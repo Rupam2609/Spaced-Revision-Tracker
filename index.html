@@ -1,0 +1,196 @@
+export interface AuthUser {
+  id: string;
+  username: string;
+  displayName: string;
+  avatar: string;
+  createdAt: string;
+}
+
+interface StoredUser extends AuthUser {
+  passwordHash: string;
+  salt: string;
+}
+
+const AUTH_KEY = 'spacerev-auth';
+const USERS_KEY = 'spacerev-auth-users';
+
+// Hash password using Web Crypto API
+async function hashPassword(password: string, salt: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(password + salt);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function generateSalt(): string {
+  const array = new Uint8Array(16);
+  crypto.getRandomValues(array);
+  return Array.from(array).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function getStoredUsers(): StoredUser[] {
+  try {
+    const data = localStorage.getItem(USERS_KEY);
+    return data ? JSON.parse(data) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredUsers(users: StoredUser[]): void {
+  localStorage.setItem(USERS_KEY, JSON.stringify(users));
+}
+
+export async function signUp(username: string, password: string, displayName: string): Promise<{ success: boolean; user?: AuthUser; error?: string }> {
+  const users = getStoredUsers();
+
+  if (users.find(u => u.username.toLowerCase() === username.toLowerCase())) {
+    return { success: false, error: 'Username already taken. Please choose another.' };
+  }
+
+  if (username.length < 3) {
+    return { success: false, error: 'Username must be at least 3 characters.' };
+  }
+
+  if (password.length < 6) {
+    return { success: false, error: 'Password must be at least 6 characters.' };
+  }
+
+  const AVATARS = ['🧑‍🎓', '👨‍💻', '👩‍💻', '🧑‍🔬', '👨‍🎓', '👩‍🎓', '🧑‍🏫', '👨‍🔬', '🦊', '🐱', '🐻', '🦁', '🐸', '🐼', '🦉'];
+  const salt = generateSalt();
+  const passwordHash = await hashPassword(password, salt);
+
+  const newUser: StoredUser = {
+    id: `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    username: username.trim(),
+    displayName: displayName.trim() || username.trim(),
+    avatar: AVATARS[Math.floor(Math.random() * AVATARS.length)],
+    createdAt: new Date().toISOString(),
+    passwordHash,
+    salt,
+  };
+
+  users.push(newUser);
+  saveStoredUsers(users);
+
+  const { passwordHash: _, salt: __, ...authUser } = newUser;
+  setSession(authUser);
+
+  return { success: true, user: authUser };
+}
+
+export async function signIn(username: string, password: string): Promise<{ success: boolean; user?: AuthUser; error?: string }> {
+  const users = getStoredUsers();
+  const user = users.find(u => u.username.toLowerCase() === username.toLowerCase());
+
+  if (!user) {
+    return { success: false, error: 'User not found. Please check your username.' };
+  }
+
+  const hash = await hashPassword(password, user.salt);
+  if (hash !== user.passwordHash) {
+    return { success: false, error: 'Incorrect password. Please try again.' };
+  }
+
+  const { passwordHash: _, salt: __, ...authUser } = user;
+  setSession(authUser);
+
+  return { success: true, user: authUser };
+}
+
+export function signOut(): void {
+  localStorage.removeItem(AUTH_KEY);
+}
+
+export function getSession(): AuthUser | null {
+  try {
+    const data = localStorage.getItem(AUTH_KEY);
+    return data ? JSON.parse(data) : null;
+  } catch {
+    return null;
+  }
+}
+
+function setSession(user: AuthUser): void {
+  localStorage.setItem(AUTH_KEY, JSON.stringify(user));
+}
+
+export function updateProfile(updates: Partial<Pick<AuthUser, 'displayName' | 'avatar'>>): AuthUser | null {
+  const session = getSession();
+  if (!session) return null;
+
+  const updated = { ...session, ...updates };
+  setSession(updated);
+
+  // Also update in stored users
+  const users = getStoredUsers();
+  const idx = users.findIndex(u => u.id === session.id);
+  if (idx !== -1) {
+    users[idx] = { ...users[idx], ...updates };
+    saveStoredUsers(users);
+  }
+
+  return updated;
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<{ success: boolean; error?: string }> {
+  const session = getSession();
+  if (!session) return { success: false, error: 'Not logged in.' };
+
+  const users = getStoredUsers();
+  const user = users.find(u => u.id === session.id);
+  if (!user) return { success: false, error: 'User not found.' };
+
+  const currentHash = await hashPassword(currentPassword, user.salt);
+  if (currentHash !== user.passwordHash) {
+    return { success: false, error: 'Current password is incorrect.' };
+  }
+
+  if (newPassword.length < 6) {
+    return { success: false, error: 'New password must be at least 6 characters.' };
+  }
+
+  const newSalt = generateSalt();
+  const newHash = await hashPassword(newPassword, newSalt);
+
+  user.passwordHash = newHash;
+  user.salt = newSalt;
+  saveStoredUsers(users);
+
+  return { success: true };
+}
+
+export function getAllUsers(): AuthUser[] {
+  return getStoredUsers().map(({ passwordHash, salt, ...user }) => user);
+}
+
+export function deleteAccount(password: string): Promise<{ success: boolean; error?: string }> {
+  return new Promise(async (resolve) => {
+    const session = getSession();
+    if (!session) return resolve({ success: false, error: 'Not logged in.' });
+
+    const users = getStoredUsers();
+    const user = users.find(u => u.id === session.id);
+    if (!user) return resolve({ success: false, error: 'User not found.' });
+
+    const hash = await hashPassword(password, user.salt);
+    if (hash !== user.passwordHash) {
+      return resolve({ success: false, error: 'Password is incorrect.' });
+    }
+
+    const filtered = users.filter(u => u.id !== session.id);
+    saveStoredUsers(filtered);
+    signOut();
+
+    // Clean up user data
+    const keys = Object.keys(localStorage);
+    keys.forEach(key => {
+      if (key.includes(`spacerev-${session.id}`)) {
+        localStorage.removeItem(key);
+      }
+    });
+
+    resolve({ success: true });
+  });
+}
